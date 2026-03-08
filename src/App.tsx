@@ -35,9 +35,10 @@ interface RoomState {
   pin: string;
   hostId: string;
   guestId?: string;
-  status: 'lobby' | 'playing';
+  status: "lobby" | "playing";
   createdAt: number;
   lastActive: number;
+  images?: Record<string, GameImage>;
   // Signaling for WebRTC
   signal?: {
     offer?: any;
@@ -65,6 +66,7 @@ export default function App() {
   const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const signalingStartedRef = useRef(false);
   const lastSentImagesRef = useRef<string>("");
+  const lastFallbackImagesRef = useRef<string>("");
 
   const flushPendingCandidates = useCallback(async () => {
     if (!pcRef.current?.remoteDescription || pendingCandidatesRef.current.length === 0) return;
@@ -211,7 +213,13 @@ export default function App() {
       };
       handleOffer();
     }
-  }, [room?.signal?.offer, room?.guestId, userId, setupPeerConnection]);
+  }, [
+    room?.signal?.offer,
+    room?.guestId,
+    userId,
+    setupPeerConnection,
+    flushPendingCandidates,
+  ]);
 
   // Both: Handle Answer
   useEffect(() => {
@@ -230,13 +238,13 @@ export default function App() {
 
   // Both: Handle ICE Candidates
   useEffect(() => {
-    if (!room?.id || !pcRef.current) return;
+    if (!room?.id) return;
     const role = room.hostId === userId ? "guest" : "host";
     const candidatesRef = ref(db, `rooms/${room.id}/signal/${role}Candidates`);
 
     const unsubscribe = onValue(candidatesRef, (snapshot) => {
       const data = snapshot.val();
-      if (data && pcRef.current) {
+      if (data) {
         Object.entries(data).forEach(([key, candidate]: [string, any]) => {
           if (!addedCandidatesRef.current.has(key) && candidate) {
             addedCandidatesRef.current.add(key);
@@ -264,6 +272,28 @@ export default function App() {
       }
     }
   }, [localImages, room?.hostId, userId]);
+
+  // Fallback: host also syncs images via Firebase so gameplay still works without P2P.
+  useEffect(() => {
+    if (!room?.id || room.hostId !== userId) return;
+
+    const currentHash = JSON.stringify(localImages);
+    if (currentHash === lastFallbackImagesRef.current) return;
+
+    lastFallbackImagesRef.current = currentHash;
+    update(ref(db, `rooms/${room.id}`), {
+      images: localImages,
+      lastActive: Date.now(),
+    }).catch((e) => console.error("Error syncing fallback images", e));
+  }, [localImages, room?.id, room?.hostId, userId]);
+
+  // Fallback: guest receives images from Firebase room state.
+  useEffect(() => {
+    if (!room || room.guestId !== userId) return;
+    if (!room.images) return;
+
+    setLocalImages(room.images);
+  }, [room?.images, room?.guestId, userId]);
 
   // Helper function to send images over data channel
   const sendImagesOverChannel = (
@@ -341,6 +371,25 @@ export default function App() {
     return () => unsubscribe();
   }, [room?.id]);
 
+  // Reset local signaling state when room returns to waiting state.
+  useEffect(() => {
+    if (!room || room.guestId) return;
+
+    if (dcRef.current) {
+      dcRef.current.close();
+      dcRef.current = null;
+    }
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+
+    signalingStartedRef.current = false;
+    addedCandidatesRef.current.clear();
+    pendingCandidatesRef.current = [];
+    setConnectionStatus("disconnected");
+  }, [room?.id, room?.guestId]);
+
   const createRoom = async () => {
     setLoading(true);
     setError(null);
@@ -354,6 +403,7 @@ export default function App() {
         pin: newPin,
         hostId: userId,
         status: "lobby",
+        images: {},
         createdAt: Date.now(),
         lastActive: Date.now(),
       };
@@ -395,6 +445,7 @@ export default function App() {
         const roomRef = ref(db, `rooms/${foundRoomId}`);
         await update(roomRef, {
           guestId: userId,
+          signal: null,
           lastActive: Date.now(),
         });
         const updatedSnapshot = await get(roomRef);
@@ -421,8 +472,10 @@ export default function App() {
       pcRef.current = null;
     }
     addedCandidatesRef.current.clear();
+    pendingCandidatesRef.current = [];
     signalingStartedRef.current = false;
     lastSentImagesRef.current = "";
+    lastFallbackImagesRef.current = "";
     setConnectionStatus("disconnected");
 
     if (room) {
@@ -436,6 +489,8 @@ export default function App() {
           await update(roomRef, {
             guestId: null,
             status: "lobby",
+            signal: null,
+            images: null,
             lastActive: Date.now(),
           });
         }
@@ -795,41 +850,49 @@ function HostUploadArea({
         </div>
       </div>
 
-      <div 
+      <div
         onClick={() => !uploading && fileInputRef.current?.click()}
         className={cn(
           "border-2 border-dashed rounded-3xl p-12 flex flex-col items-center justify-center transition-all cursor-pointer",
-          uploading ? "bg-gray-50 border-gray-200 cursor-not-allowed" : "bg-indigo-50/30 border-indigo-200 hover:border-indigo-400 hover:bg-indigo-50/50"
+          uploading
+            ? "bg-gray-50 border-gray-200 cursor-not-allowed"
+            : "bg-indigo-50/30 border-indigo-200 hover:border-indigo-400 hover:bg-indigo-50/50",
         )}
       >
-        <input 
-          type="file" 
-          multiple 
-          accept="image/*" 
-          className="hidden" 
+        <input
+          type="file"
+          multiple
+          accept="image/*"
+          className="hidden"
           ref={fileInputRef}
           onChange={handleFileChange}
           disabled={uploading}
         />
-        
+
         {uploading ? (
           <div className="text-center space-y-4 w-full max-w-xs">
             <div className="relative h-2 bg-gray-200 rounded-full overflow-hidden">
-              <motion.div 
+              <motion.div
                 initial={{ width: 0 }}
                 animate={{ width: `${progress}%` }}
                 className="absolute inset-0 bg-indigo-600"
               />
             </div>
-            <p className="text-sm font-bold text-gray-600">Compressing & Uploading... {progress}%</p>
+            <p className="text-sm font-bold text-gray-600">
+              Compressing & Uploading... {progress}%
+            </p>
           </div>
         ) : (
           <>
             <div className="w-16 h-16 bg-white rounded-2xl shadow-sm flex items-center justify-center mb-4 border border-indigo-100">
               <Upload className="text-indigo-600" />
             </div>
-            <p className="font-bold text-gray-900 mb-1">Click to upload images</p>
-            <p className="text-sm text-gray-500">PNG, JPG, GIF up to 10MB each</p>
+            <p className="font-bold text-gray-900 mb-1">
+              Click to upload images
+            </p>
+            <p className="text-sm text-gray-500">
+              PNG, JPG, GIF up to 10MB each
+            </p>
           </>
         )}
       </div>
@@ -839,15 +902,19 @@ function HostUploadArea({
           <div className="grid grid-cols-4 sm:grid-cols-6 gap-3">
             <AnimatePresence>
               {Object.values(localImages).map((img) => (
-                <motion.div 
+                <motion.div
                   key={img.id}
                   initial={{ opacity: 0, scale: 0.8 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.8 }}
                   className="relative aspect-square rounded-xl overflow-hidden group border border-black/5"
                 >
-                  <img src={img.url} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                  <button 
+                  <img
+                    src={img.url}
+                    className="w-full h-full object-cover"
+                    referrerPolicy="no-referrer"
+                  />
+                  <button
                     onClick={() => removeImage(img.id)}
                     className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white"
                   >
@@ -862,24 +929,42 @@ function HostUploadArea({
             <div className="flex flex-col gap-1">
               <div className="flex items-center gap-2 text-sm font-medium text-gray-500">
                 {imageCount < 2 ? (
-                  <><AlertCircle size={16} className="text-amber-500" /> Upload at least 2 images</>
+                  <>
+                    <AlertCircle size={16} className="text-amber-500" /> Upload
+                    at least 2 images
+                  </>
                 ) : (
-                  <><CheckCircle2 size={16} className="text-emerald-500" /> Ready to play!</>
+                  <>
+                    <CheckCircle2 size={16} className="text-emerald-500" />{" "}
+                    Ready to play!
+                  </>
                 )}
               </div>
               <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider">
-                <span className={cn(
-                  "w-2 h-2 rounded-full",
-                  connectionStatus === 'connected' ? "bg-emerald-500" : "bg-amber-500 animate-pulse"
-                )} />
-                <span className={connectionStatus === 'connected' ? "text-emerald-600" : "text-amber-600"}>
-                  {connectionStatus === 'connected' ? "P2P Connected" : "Waiting for Peer..."}
+                <span
+                  className={cn(
+                    "w-2 h-2 rounded-full",
+                    connectionStatus === "connected"
+                      ? "bg-emerald-500"
+                      : "bg-amber-500 animate-pulse",
+                  )}
+                />
+                <span
+                  className={
+                    connectionStatus === "connected"
+                      ? "text-emerald-600"
+                      : "text-amber-600"
+                  }
+                >
+                  {connectionStatus === "connected"
+                    ? "P2P Connected"
+                    : "Waiting for Peer..."}
                 </span>
               </div>
             </div>
             <button
               onClick={startGame}
-              disabled={imageCount < 2 || !room.guestId || connectionStatus !== 'connected'}
+              disabled={imageCount < 2 || !room.guestId}
               className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-gray-200 disabled:text-gray-400 text-white font-bold px-8 py-3 rounded-2xl transition-all flex items-center gap-2 shadow-lg shadow-indigo-200 disabled:shadow-none"
             >
               Start Game
