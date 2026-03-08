@@ -62,8 +62,24 @@ export default function App() {
   const dcRef = useRef<RTCDataChannel | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   const addedCandidatesRef = useRef<Set<string>>(new Set());
+  const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
   const signalingStartedRef = useRef(false);
   const lastSentImagesRef = useRef<string>("");
+
+  const flushPendingCandidates = useCallback(async () => {
+    if (!pcRef.current?.remoteDescription || pendingCandidatesRef.current.length === 0) return;
+
+    const pending = [...pendingCandidatesRef.current];
+    pendingCandidatesRef.current = [];
+
+    for (const candidate of pending) {
+      try {
+        await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (e) {
+        console.error("Error adding pending ICE candidate", e);
+      }
+    }
+  }, []);
 
   // --- WebRTC Logic ---
 
@@ -112,6 +128,7 @@ export default function App() {
       !room.signal?.offer &&
       !signalingStartedRef.current
     ) {
+      setConnectionStatus("connecting");
       signalingStartedRef.current = true;
       const startSignaling = async () => {
         const pc = setupPeerConnection();
@@ -148,6 +165,7 @@ export default function App() {
       !room.signal?.answer &&
       !signalingStartedRef.current
     ) {
+      setConnectionStatus("connecting");
       signalingStartedRef.current = true;
       const handleOffer = async () => {
         const pc = setupPeerConnection();
@@ -184,6 +202,7 @@ export default function App() {
         await pc.setRemoteDescription(
           new RTCSessionDescription(room.signal!.offer),
         );
+        await flushPendingCandidates();
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         await update(ref(db, `rooms/${room.id}/signal`), {
@@ -202,11 +221,12 @@ export default function App() {
       room.signal?.answer &&
       pcRef.current?.signalingState === "have-local-offer"
     ) {
-      pcRef.current.setRemoteDescription(
-        new RTCSessionDescription(room.signal.answer),
-      );
+      pcRef.current
+        .setRemoteDescription(new RTCSessionDescription(room.signal.answer))
+        .then(() => flushPendingCandidates())
+        .catch((e) => console.error("Error setting remote answer", e));
     }
-  }, [room?.signal?.answer, room?.hostId, userId]);
+  }, [room?.signal?.answer, room?.hostId, userId, flushPendingCandidates]);
 
   // Both: Handle ICE Candidates
   useEffect(() => {
@@ -216,13 +236,17 @@ export default function App() {
 
     const unsubscribe = onValue(candidatesRef, (snapshot) => {
       const data = snapshot.val();
-      if (data && pcRef.current?.remoteDescription) {
+      if (data && pcRef.current) {
         Object.entries(data).forEach(([key, candidate]: [string, any]) => {
-          if (!addedCandidatesRef.current.has(key)) {
+          if (!addedCandidatesRef.current.has(key) && candidate) {
             addedCandidatesRef.current.add(key);
-            pcRef.current
-              ?.addIceCandidate(new RTCIceCandidate(candidate))
-              .catch((e) => console.error("Error adding ICE candidate", e));
+            if (pcRef.current?.remoteDescription) {
+              pcRef.current
+                .addIceCandidate(new RTCIceCandidate(candidate))
+                .catch((e) => console.error("Error adding ICE candidate", e));
+            } else {
+              pendingCandidatesRef.current.push(candidate);
+            }
           }
         });
       }
