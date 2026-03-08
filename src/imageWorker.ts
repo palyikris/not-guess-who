@@ -1,8 +1,10 @@
 /**
  * Image Compression Worker
  */
-self.onmessage = async (e: MessageEvent<{ file: File; maxSize: number }>) => {
-  const { file, maxSize } = e.data;
+self.onmessage = async (
+  e: MessageEvent<{ requestId: string; file: File; maxSize: number }>,
+) => {
+  const { requestId, file, maxSize } = e.data;
 
   try {
     const bitmap = await createImageBitmap(file);
@@ -40,10 +42,14 @@ self.onmessage = async (e: MessageEvent<{ file: File; maxSize: number }>) => {
 
     const reader = new FileReader();
     reader.onloadend = () => {
-      self.postMessage({ base64: reader.result, success: true });
+      self.postMessage({ requestId, base64: reader.result, success: true });
     };
     reader.readAsDataURL(blob);
   } catch (error) {
-    self.postMessage({ success: false, error: (error as Error).message });
+    self.postMessage({
+      requestId,
+      success: false,
+      error: (error as Error).message,
+    });
   }
 };

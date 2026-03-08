@@ -780,6 +780,7 @@ function HostUploadArea({
 
     const newLocalImages: Record<string, GameImage> = { ...localImages };
     const total = files.length;
+    let completed = 0;
 
     // Process images in parallel for better performance
     const compressionPromises = files.map((file, i) =>
@@ -791,33 +792,54 @@ function HostUploadArea({
             url: base64,
             isFlipped: false,
           };
-          setProgress(Math.round(((i + 1) / total) * 100));
+          completed += 1;
+          setProgress(Math.round((completed / total) * 100));
         })
         .catch((err) => {
           console.error("Compression failed for file:", file.name, err);
+          completed += 1;
+          setProgress(Math.round((completed / total) * 100));
         }),
     );
 
     await Promise.all(compressionPromises);
     setLocalImages(newLocalImages);
     setUploading(false);
-  };;
+  };
 
   const compressImage = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       if (!workerRef.current) return reject("Worker not initialized");
 
-      const handleMessage = (e: MessageEvent) => {
-        if (e.data.success) {
+      const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+      const handleMessage = (
+        e: MessageEvent<{
+          requestId?: string;
+          success: boolean;
+          base64?: string;
+          error?: string;
+        }>,
+      ) => {
+        if (!e.data || e.data.requestId !== requestId) {
+          return;
+        }
+
+        workerRef.current?.removeEventListener("message", handleMessage);
+
+        if (e.data.success && typeof e.data.base64 === "string") {
           resolve(e.data.base64);
         } else {
-          reject(e.data.error);
+          reject(e.data.error || "Image compression failed");
         }
-        workerRef.current?.removeEventListener("message", handleMessage);
       };
 
       workerRef.current.addEventListener("message", handleMessage);
-      workerRef.current.postMessage({ file, maxSize: 2 * 1024 * 1024 }); // 2MB
+      workerRef.current.postMessage({
+        requestId,
+        file,
+        maxSize: 2 * 1024 * 1024,
+      }); // 2MB
     });
   };
 
@@ -992,25 +1014,15 @@ function GameBoard({
 }) {
   const [flippedStates, setFlippedStates] = useState<Record<string, boolean>>({});
 
-  useEffect(() => {
-    const flippedRef = ref(db, `rooms/${room.id}/flipped`);
-    const unsubscribe = onValue(flippedRef, (snapshot) => {
-      setFlippedStates(snapshot.val() || {});
-    });
-    return () => unsubscribe();
-  }, [room.id]);
-
-  const toggleFlip = async (id: string) => {
-    const currentFlipped = flippedStates[id] || false;
-    await update(ref(db, `rooms/${room.id}`), {
-      [`flipped/${id}`]: !currentFlipped,
-      lastActive: Date.now()
-    });
+  const toggleFlip = (id: string) => {
+    setFlippedStates((prev) => ({
+      ...prev,
+      [id]: !prev[id],
+    }));
   };
 
-  const resetBoard = async () => {
-    await set(ref(db, `rooms/${room.id}/flipped`), null);
-    await update(ref(db, `rooms/${room.id}`), { lastActive: Date.now() });
+  const resetBoard = () => {
+    setFlippedStates({});
   };
 
   const images = Object.values(localImages).map(img => ({
