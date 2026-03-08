@@ -73,7 +73,14 @@ export default function App() {
       if (event.candidate && room?.id) {
         const role = room.hostId === userId ? 'host' : 'guest';
         const candidatesRef = ref(db, `rooms/${room.id}/signal/${role}Candidates`);
-        push(candidatesRef, event.candidate.toJSON());
+        // Store candidate as plain object
+        const candidateData = {
+          candidate: event.candidate.candidate,
+          sdpMid: event.candidate.sdpMid,
+          sdpMLineIndex: event.candidate.sdpMLineIndex,
+          usernameFragment: event.candidate.usernameFragment
+        };
+        push(candidatesRef, candidateData);
       }
     };
 
@@ -168,9 +175,10 @@ export default function App() {
     
     const unsubscribe = onValue(candidatesRef, (snapshot) => {
       const data = snapshot.val();
-      if (data) {
+      if (data && pcRef.current?.remoteDescription) {
         Object.values(data).forEach((candidate: any) => {
-          pcRef.current?.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding ICE candidate", e));
+          pcRef.current?.addIceCandidate(new RTCIceCandidate(candidate))
+            .catch(e => console.error("Error adding ICE candidate", e));
         });
       }
     });
