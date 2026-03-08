@@ -1,0 +1,5 @@
+{
+  "name": "Guess Who: Image Edition",
+  "description": "A real-time, two-player image guessing game where you flip cards to find the mystery character.",
+  "requestFramePermissions": []
+}
