@@ -63,33 +63,40 @@ export default function App() {
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   const addedCandidatesRef = useRef<Set<string>>(new Set());
   const signalingStartedRef = useRef(false);
-  const lastSentImagesRef = useRef<string>('');
+  const lastSentImagesRef = useRef<string>("");
 
   // --- WebRTC Logic ---
 
   const setupPeerConnection = useCallback(() => {
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     });
 
     pc.onicecandidate = (event) => {
       if (event.candidate && room?.id) {
-        const role = room.hostId === userId ? 'host' : 'guest';
-        const candidatesRef = ref(db, `rooms/${room.id}/signal/${role}Candidates`);
+        const role = room.hostId === userId ? "host" : "guest";
+        const candidatesRef = ref(
+          db,
+          `rooms/${room.id}/signal/${role}Candidates`,
+        );
         // Store candidate as plain object
         const candidateData = {
           candidate: event.candidate.candidate,
           sdpMid: event.candidate.sdpMid,
           sdpMLineIndex: event.candidate.sdpMLineIndex,
-          usernameFragment: event.candidate.usernameFragment
+          usernameFragment: event.candidate.usernameFragment,
         };
         push(candidatesRef, candidateData);
       }
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') setConnectionStatus('connected');
-      if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') setConnectionStatus('disconnected');
+      if (pc.connectionState === "connected") setConnectionStatus("connected");
+      if (
+        pc.connectionState === "disconnected" ||
+        pc.connectionState === "failed"
+      )
+        setConnectionStatus("disconnected");
     };
 
     pcRef.current = pc;
@@ -98,11 +105,17 @@ export default function App() {
 
   // Host Logic: Create Offer
   useEffect(() => {
-    if (room && room.hostId === userId && room.guestId && !room.signal?.offer && !signalingStartedRef.current) {
+    if (
+      room &&
+      room.hostId === userId &&
+      room.guestId &&
+      !room.signal?.offer &&
+      !signalingStartedRef.current
+    ) {
       signalingStartedRef.current = true;
       const startSignaling = async () => {
         const pc = setupPeerConnection();
-        const dc = pc.createDataChannel('imageTransfer');
+        const dc = pc.createDataChannel("imageTransfer");
         dcRef.current = dc;
 
         dc.onopen = () => {
@@ -128,32 +141,38 @@ export default function App() {
 
   // Guest Logic: Handle Offer & Create Answer
   useEffect(() => {
-    if (room && room.guestId === userId && room.signal?.offer && !room.signal?.answer && !signalingStartedRef.current) {
+    if (
+      room &&
+      room.guestId === userId &&
+      room.signal?.offer &&
+      !room.signal?.answer &&
+      !signalingStartedRef.current
+    ) {
       signalingStartedRef.current = true;
       const handleOffer = async () => {
         const pc = setupPeerConnection();
-        
+
         pc.ondatachannel = (event) => {
           const dc = event.channel;
           dcRef.current = dc;
-          let receivedData = '';
-          
+          let receivedData = "";
+
           dc.onmessage = (e) => {
             try {
               const msg = JSON.parse(e.data);
-              if (msg.type === 'CHUNK') {
+              if (msg.type === "CHUNK") {
                 receivedData += msg.data;
                 if (msg.isLast) {
                   const fullData = JSON.parse(receivedData);
-                  if (fullData.type === 'IMAGES') {
+                  if (fullData.type === "IMAGES") {
                     setLocalImages(fullData.data);
                   }
-                  receivedData = '';
+                  receivedData = "";
                 }
               }
             } catch (err) {
               console.error("Error parsing data channel message:", err);
-              receivedData = '';
+              receivedData = "";
             }
           };
 
@@ -162,7 +181,9 @@ export default function App() {
           };
         };
 
-        await pc.setRemoteDescription(new RTCSessionDescription(room.signal!.offer));
+        await pc.setRemoteDescription(
+          new RTCSessionDescription(room.signal!.offer),
+        );
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         await update(ref(db, `rooms/${room.id}/signal`), {
@@ -175,25 +196,33 @@ export default function App() {
 
   // Both: Handle Answer
   useEffect(() => {
-    if (room && room.hostId === userId && room.signal?.answer && pcRef.current?.signalingState === 'have-local-offer') {
-      pcRef.current.setRemoteDescription(new RTCSessionDescription(room.signal.answer));
+    if (
+      room &&
+      room.hostId === userId &&
+      room.signal?.answer &&
+      pcRef.current?.signalingState === "have-local-offer"
+    ) {
+      pcRef.current.setRemoteDescription(
+        new RTCSessionDescription(room.signal.answer),
+      );
     }
   }, [room?.signal?.answer, room?.hostId, userId]);
 
   // Both: Handle ICE Candidates
   useEffect(() => {
     if (!room?.id || !pcRef.current) return;
-    const role = room.hostId === userId ? 'guest' : 'host';
+    const role = room.hostId === userId ? "guest" : "host";
     const candidatesRef = ref(db, `rooms/${room.id}/signal/${role}Candidates`);
-    
+
     const unsubscribe = onValue(candidatesRef, (snapshot) => {
       const data = snapshot.val();
       if (data && pcRef.current?.remoteDescription) {
         Object.entries(data).forEach(([key, candidate]: [string, any]) => {
           if (!addedCandidatesRef.current.has(key)) {
             addedCandidatesRef.current.add(key);
-            pcRef.current?.addIceCandidate(new RTCIceCandidate(candidate))
-              .catch(e => console.error("Error adding ICE candidate", e));
+            pcRef.current
+              ?.addIceCandidate(new RTCIceCandidate(candidate))
+              .catch((e) => console.error("Error adding ICE candidate", e));
           }
         });
       }
@@ -203,7 +232,7 @@ export default function App() {
 
   // Sync images over data channel when they change
   useEffect(() => {
-    if (dcRef.current?.readyState === 'open' && room?.hostId === userId) {
+    if (dcRef.current?.readyState === "open" && room?.hostId === userId) {
       const currentHash = JSON.stringify(localImages);
       if (currentHash !== lastSentImagesRef.current) {
         lastSentImagesRef.current = currentHash;
@@ -213,17 +242,22 @@ export default function App() {
   }, [localImages, room?.hostId, userId]);
 
   // Helper function to send images over data channel
-  const sendImagesOverChannel = (dc: RTCDataChannel, images: Record<string, GameImage>) => {
+  const sendImagesOverChannel = (
+    dc: RTCDataChannel,
+    images: Record<string, GameImage>,
+  ) => {
     try {
-      const data = JSON.stringify({ type: 'IMAGES', data: images });
+      const data = JSON.stringify({ type: "IMAGES", data: images });
       const chunkSize = 16384;
       for (let i = 0; i < data.length; i += chunkSize) {
         const chunk = data.slice(i, i + chunkSize);
-        dc.send(JSON.stringify({ 
-          type: 'CHUNK', 
-          data: chunk, 
-          isLast: i + chunkSize >= data.length 
-        }));
+        dc.send(
+          JSON.stringify({
+            type: "CHUNK",
+            data: chunk,
+            isLast: i + chunkSize >= data.length,
+          }),
+        );
       }
     } catch (err) {
       console.error("Error sending images:", err);
@@ -233,7 +267,7 @@ export default function App() {
   // Cleanup old rooms (older than 1 hour)
   const cleanupOldRooms = useCallback(async () => {
     try {
-      const roomsRef = ref(db, 'rooms');
+      const roomsRef = ref(db, "rooms");
       const snapshot = await get(roomsRef);
       const rooms = snapshot.val();
       if (!rooms) return;
@@ -252,7 +286,9 @@ export default function App() {
 
       if (Object.keys(updates).length > 0) {
         await update(ref(db), updates);
-        console.log(`Cleaned up ${Object.keys(updates).length} inactive rooms.`);
+        console.log(
+          `Cleaned up ${Object.keys(updates).length} inactive rooms.`,
+        );
       }
     } catch (err) {
       console.error("Cleanup failed:", err);
@@ -286,14 +322,14 @@ export default function App() {
     setError(null);
     try {
       const newPin = Math.floor(100000 + Math.random() * 900000).toString();
-      const roomRef = push(ref(db, 'rooms'));
+      const roomRef = push(ref(db, "rooms"));
       const roomId = roomRef.key!;
-      
+
       const initialRoom: RoomState = {
         id: roomId,
         pin: newPin,
         hostId: userId,
-        status: 'lobby',
+        status: "lobby",
         createdAt: Date.now(),
         lastActive: Date.now(),
       };
@@ -317,10 +353,10 @@ export default function App() {
     setLoading(true);
     setError(null);
     try {
-      const roomsRef = ref(db, 'rooms');
+      const roomsRef = ref(db, "rooms");
       const snapshot = await get(roomsRef);
       const rooms = snapshot.val();
-      
+
       let foundRoomId: string | null = null;
       if (rooms) {
         for (const id in rooms) {
@@ -333,9 +369,9 @@ export default function App() {
 
       if (foundRoomId) {
         const roomRef = ref(db, `rooms/${foundRoomId}`);
-        await update(roomRef, { 
+        await update(roomRef, {
           guestId: userId,
-          lastActive: Date.now()
+          lastActive: Date.now(),
         });
         const updatedSnapshot = await get(roomRef);
         setRoom(updatedSnapshot.val());
@@ -362,8 +398,8 @@ export default function App() {
     }
     addedCandidatesRef.current.clear();
     signalingStartedRef.current = false;
-    lastSentImagesRef.current = '';
-    setConnectionStatus('disconnected');
+    lastSentImagesRef.current = "";
+    setConnectionStatus("disconnected");
 
     if (room) {
       try {
@@ -373,10 +409,10 @@ export default function App() {
           await set(roomRef, null);
         } else if (room.guestId === userId) {
           // Guest leaves: remove guest and reset to lobby
-          await update(roomRef, { 
+          await update(roomRef, {
             guestId: null,
-            status: 'lobby',
-            lastActive: Date.now()
+            status: "lobby",
+            lastActive: Date.now(),
           });
         }
       } catch (err) {
@@ -384,7 +420,7 @@ export default function App() {
       }
     }
     setRoom(null);
-    setPin('');
+    setPin("");
     setError(null);
   };
 
@@ -667,26 +703,26 @@ function HostUploadArea({
     const total = files.length;
 
     // Process images in parallel for better performance
-    const compressionPromises = files.map((file, i) => 
+    const compressionPromises = files.map((file, i) =>
       compressImage(file)
-        .then(base64 => {
+        .then((base64) => {
           const id = Math.random().toString(36).substring(7);
           newLocalImages[id] = {
             id,
             url: base64,
-            isFlipped: false
+            isFlipped: false,
           };
           setProgress(Math.round(((i + 1) / total) * 100));
         })
-        .catch(err => {
+        .catch((err) => {
           console.error("Compression failed for file:", file.name, err);
-        })
+        }),
     );
 
     await Promise.all(compressionPromises);
     setLocalImages(newLocalImages);
     setUploading(false);
-  };
+  };;
 
   const compressImage = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -698,10 +734,10 @@ function HostUploadArea({
         } else {
           reject(e.data.error);
         }
-        workerRef.current?.removeEventListener('message', handleMessage);
+        workerRef.current?.removeEventListener("message", handleMessage);
       };
 
-      workerRef.current.addEventListener('message', handleMessage);
+      workerRef.current.addEventListener("message", handleMessage);
       workerRef.current.postMessage({ file, maxSize: 2 * 1024 * 1024 }); // 2MB
     });
   };
