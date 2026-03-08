@@ -61,6 +61,9 @@ export default function App() {
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const dcRef = useRef<RTCDataChannel | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
+  const addedCandidatesRef = useRef<Set<string>>(new Set());
+  const signalingStartedRef = useRef(false);
+  const lastSentImagesRef = useRef<string>('');
 
   // --- WebRTC Logic ---
 
@@ -95,7 +98,8 @@ export default function App() {
 
   // Host Logic: Create Offer
   useEffect(() => {
-    if (room && room.hostId === userId && room.guestId && !room.signal?.offer) {
+    if (room && room.hostId === userId && room.guestId && !room.signal?.offer && !signalingStartedRef.current) {
+      signalingStartedRef.current = true;
       const startSignaling = async () => {
         const pc = setupPeerConnection();
         const dc = pc.createDataChannel('imageTransfer');
@@ -104,22 +108,19 @@ export default function App() {
         dc.onopen = () => {
           console.log("Data channel open! Sending images...");
           if (Object.keys(localImages).length > 0) {
-            const data = JSON.stringify({ type: 'IMAGES', data: localImages });
-            const chunkSize = 16384; // 16KB chunks
-            for (let i = 0; i < data.length; i += chunkSize) {
-              const chunk = data.slice(i, i + chunkSize);
-              dc.send(JSON.stringify({ 
-                type: 'CHUNK', 
-                data: chunk, 
-                isLast: i + chunkSize >= data.length 
-              }));
-            }
+            sendImagesOverChannel(dc, localImages);
           }
+        };
+
+        dc.onerror = (error) => {
+          console.error("Data channel error:", error);
         };
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-        await update(ref(db, `rooms/${room.id}/signal`), { offer: offer.toJSON() });
+        await update(ref(db, `rooms/${room.id}/signal`), {
+          offer: { type: offer.type, sdp: offer.sdp },
+        });
       };
       startSignaling();
     }
@@ -127,7 +128,8 @@ export default function App() {
 
   // Guest Logic: Handle Offer & Create Answer
   useEffect(() => {
-    if (room && room.guestId === userId && room.signal?.offer && !room.signal?.answer) {
+    if (room && room.guestId === userId && room.signal?.offer && !room.signal?.answer && !signalingStartedRef.current) {
+      signalingStartedRef.current = true;
       const handleOffer = async () => {
         const pc = setupPeerConnection();
         
@@ -137,24 +139,35 @@ export default function App() {
           let receivedData = '';
           
           dc.onmessage = (e) => {
-            const msg = JSON.parse(e.data);
-            if (msg.type === 'CHUNK') {
-              receivedData += msg.data;
-              if (msg.isLast) {
-                const fullData = JSON.parse(receivedData);
-                if (fullData.type === 'IMAGES') {
-                  setLocalImages(fullData.data);
+            try {
+              const msg = JSON.parse(e.data);
+              if (msg.type === 'CHUNK') {
+                receivedData += msg.data;
+                if (msg.isLast) {
+                  const fullData = JSON.parse(receivedData);
+                  if (fullData.type === 'IMAGES') {
+                    setLocalImages(fullData.data);
+                  }
+                  receivedData = '';
                 }
-                receivedData = '';
               }
+            } catch (err) {
+              console.error("Error parsing data channel message:", err);
+              receivedData = '';
             }
+          };
+
+          dc.onerror = (error) => {
+            console.error("Data channel error:", error);
           };
         };
 
         await pc.setRemoteDescription(new RTCSessionDescription(room.signal!.offer));
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        await update(ref(db, `rooms/${room.id}/signal`), { answer: answer.toJSON() });
+        await update(ref(db, `rooms/${room.id}/signal`), {
+          answer: { type: answer.type, sdp: answer.sdp },
+        });
       };
       handleOffer();
     }
@@ -176,9 +189,12 @@ export default function App() {
     const unsubscribe = onValue(candidatesRef, (snapshot) => {
       const data = snapshot.val();
       if (data && pcRef.current?.remoteDescription) {
-        Object.values(data).forEach((candidate: any) => {
-          pcRef.current?.addIceCandidate(new RTCIceCandidate(candidate))
-            .catch(e => console.error("Error adding ICE candidate", e));
+        Object.entries(data).forEach(([key, candidate]: [string, any]) => {
+          if (!addedCandidatesRef.current.has(key)) {
+            addedCandidatesRef.current.add(key);
+            pcRef.current?.addIceCandidate(new RTCIceCandidate(candidate))
+              .catch(e => console.error("Error adding ICE candidate", e));
+          }
         });
       }
     });
@@ -188,18 +204,31 @@ export default function App() {
   // Sync images over data channel when they change
   useEffect(() => {
     if (dcRef.current?.readyState === 'open' && room?.hostId === userId) {
-      const data = JSON.stringify({ type: 'IMAGES', data: localImages });
+      const currentHash = JSON.stringify(localImages);
+      if (currentHash !== lastSentImagesRef.current) {
+        lastSentImagesRef.current = currentHash;
+        sendImagesOverChannel(dcRef.current, localImages);
+      }
+    }
+  }, [localImages, room?.hostId, userId]);
+
+  // Helper function to send images over data channel
+  const sendImagesOverChannel = (dc: RTCDataChannel, images: Record<string, GameImage>) => {
+    try {
+      const data = JSON.stringify({ type: 'IMAGES', data: images });
       const chunkSize = 16384;
       for (let i = 0; i < data.length; i += chunkSize) {
         const chunk = data.slice(i, i + chunkSize);
-        dcRef.current.send(JSON.stringify({ 
+        dc.send(JSON.stringify({ 
           type: 'CHUNK', 
           data: chunk, 
           isLast: i + chunkSize >= data.length 
         }));
       }
+    } catch (err) {
+      console.error("Error sending images:", err);
     }
-  }, [localImages, room?.hostId, userId]);
+  };
 
   // Cleanup old rooms (older than 1 hour)
   const cleanupOldRooms = useCallback(async () => {
@@ -322,6 +351,20 @@ export default function App() {
   };
 
   const leaveRoom = async () => {
+    // Cleanup WebRTC connections
+    if (dcRef.current) {
+      dcRef.current.close();
+      dcRef.current = null;
+    }
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+    addedCandidatesRef.current.clear();
+    signalingStartedRef.current = false;
+    lastSentImagesRef.current = '';
+    setConnectionStatus('disconnected');
+
     if (room) {
       try {
         const roomRef = ref(db, `rooms/${room.id}`);
@@ -344,6 +387,14 @@ export default function App() {
     setPin('');
     setError(null);
   };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (dcRef.current) dcRef.current.close();
+      if (pcRef.current) pcRef.current.close();
+    };
+  }, []);
 
   if (!room) {
     return (
@@ -615,23 +666,24 @@ function HostUploadArea({
     const newLocalImages: Record<string, GameImage> = { ...localImages };
     const total = files.length;
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      
-      try {
-        const base64 = await compressImage(file);
-        const id = Math.random().toString(36).substring(7);
-        newLocalImages[id] = {
-          id,
-          url: base64,
-          isFlipped: false
-        };
-        setProgress(Math.round(((i + 1) / total) * 100));
-      } catch (err) {
-        console.error("Compression failed for file:", file.name, err);
-      }
-    }
+    // Process images in parallel for better performance
+    const compressionPromises = files.map((file, i) => 
+      compressImage(file)
+        .then(base64 => {
+          const id = Math.random().toString(36).substring(7);
+          newLocalImages[id] = {
+            id,
+            url: base64,
+            isFlipped: false
+          };
+          setProgress(Math.round(((i + 1) / total) * 100));
+        })
+        .catch(err => {
+          console.error("Compression failed for file:", file.name, err);
+        })
+    );
 
+    await Promise.all(compressionPromises);
     setLocalImages(newLocalImages);
     setUploading(false);
   };
@@ -640,14 +692,16 @@ function HostUploadArea({
     return new Promise((resolve, reject) => {
       if (!workerRef.current) return reject("Worker not initialized");
 
-      workerRef.current.onmessage = (e) => {
+      const handleMessage = (e: MessageEvent) => {
         if (e.data.success) {
           resolve(e.data.base64);
         } else {
           reject(e.data.error);
         }
+        workerRef.current?.removeEventListener('message', handleMessage);
       };
 
+      workerRef.current.addEventListener('message', handleMessage);
       workerRef.current.postMessage({ file, maxSize: 2 * 1024 * 1024 }); // 2MB
     });
   };
